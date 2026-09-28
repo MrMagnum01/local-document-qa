@@ -12,8 +12,15 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import config
+
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
 SECTION_RE = re.compile(r"^##\s+(.+)$")
+
+# Bumped whenever the chunking scheme changes (section boundary rule, overlap,
+# per-passage truncation length, id/slug scheme). An index built under a
+# different value is stale even if the corpus bytes are unchanged.
+CHUNK_VERSION = "section-v1-4000char-noOverlap"
 
 
 class CorpusError(ValueError):
@@ -35,6 +42,7 @@ class Passage:
     supersedes: str = None
     superseded_by: str = None
     content_hash: str = field(default="")
+    truncated_at_index: bool = False
 
     def __post_init__(self):
         if not self.content_hash:
@@ -111,8 +119,14 @@ def load_corpus(corpus_dir: str) -> list:
     seen_ids = set()
     for path in sorted(root.glob("*.md")):
         _resolve_within(root, path)
-        if path.stat().st_size == 0:
+        size = path.stat().st_size
+        if size == 0:
             raise CorpusError(f"{path}: zero-byte document")
+        if size > config.MAX_CORPUS_FILE_BYTES:
+            raise CorpusError(
+                f"{path}: {size} bytes exceeds the {config.MAX_CORPUS_FILE_BYTES}-byte "
+                "per-document bound"
+            )
         meta, sections = parse_document(path)
         doc_id = meta["id"]
         for title, text in sections:
@@ -127,7 +141,7 @@ def load_corpus(corpus_dir: str) -> list:
                     id=pid,
                     doc_id=doc_id,
                     section_title=title,
-                    text=text[: 4000],
+                    text=text[: config.INDEX_MAX_PASSAGE_CHARS],
                     company=meta["company"],
                     doc_type=meta["doc_type"],
                     title=meta["title"],
@@ -136,8 +150,32 @@ def load_corpus(corpus_dir: str) -> list:
                     status=meta["status"],
                     supersedes=meta.get("supersedes"),
                     superseded_by=meta.get("superseded_by"),
+                    truncated_at_index=len(text) > config.INDEX_MAX_PASSAGE_CHARS,
                 )
             )
+            if len(passages) > config.MAX_CORPUS_PASSAGES:
+                raise CorpusError(
+                    f"Corpus at {corpus_dir} exceeds the {config.MAX_CORPUS_PASSAGES}-passage bound"
+                )
     if not passages:
         raise CorpusError(f"No passages loaded from {corpus_dir} — empty corpus")
     return passages
+
+
+def corpus_fingerprint(corpus_dir: str) -> str:
+    """Hash-bind a corpus directory's *current* on-disk bytes for staleness
+    detection: sha256 over the sorted (filename, sha256(file bytes)) pairs of
+    every ``*.md`` file directly under ``corpus_dir``. Two directories with the
+    same fingerprint have byte-identical source documents; any edit, addition,
+    removal, or move changes it."""
+    root = Path(corpus_dir)
+    if not root.is_dir():
+        raise CorpusError(f"Corpus directory does not exist: {corpus_dir}")
+    parts = []
+    for path in sorted(root.glob("*.md")):
+        _resolve_within(root, path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        parts.append(f"{path.name}:{digest}")
+    if not parts:
+        raise CorpusError(f"No corpus files found in {corpus_dir}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()

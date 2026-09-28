@@ -56,15 +56,30 @@ def _build_prompt(question: str, passages: list) -> str:
     blocks = []
     for p in passages:
         text = sanitize_for_prompt(p["text"][: config.MAX_PASSAGE_CHARS])
-        blocks.append(
-            f"[{p['id']}] ({p['title']}, version {p['version']}, status {p['status']}, "
-            f"effective_date {p['effective_date']})\n{text}"
+        meta = (
+            f"{p['title']}, version {p['version']}, status {p['status']}, "
+            f"company {p['company']}, effective_date {p['effective_date']}, "
+            f"supersedes {p['supersedes'] or 'none'}, superseded_by {p['superseded_by'] or 'none'}"
         )
+        blocks.append(f"[{p['id']}] ({meta})\n{text}")
     passages_block = "\n\n".join(blocks)
     return f"DOCUMENT PASSAGES:\n\n{passages_block}\n\nQUESTION: {question}\n\nAnswer following the rules."
 
 
 def _parse_output(raw: str, valid_ids: set) -> tuple:
+    """Parse the model's raw two-line output. `valid_ids` must be exactly the
+    passage ids actually placed in this prompt's context -- not any broader
+    retrieved set -- so a citation to a passage the model never saw is
+    rejected the same way a wholly fabricated id is.
+
+    Any citation outside `valid_ids` forces the whole answer to ABSTAIN, even
+    when mixed with otherwise-valid citations: a partially fabricated source
+    list cannot be laundered into an accepted answer by dropping the bad id
+    and keeping the rest. The returned answer text is always a clean,
+    fixed abstention marker on the ABSTAIN path; the model's raw attempt is
+    preserved separately (by the caller) as diagnostic evidence only, never
+    as the rendered answer.
+    """
     stripped = raw.strip()
 
     sources_m = SOURCES_RE.search(stripped)
@@ -73,30 +88,39 @@ def _parse_output(raw: str, valid_ids: set) -> tuple:
     answer_text = ANSWER_PREFIX_RE.sub("", before_sources).strip()
 
     if answer_text.upper() == config.ABSTAIN_TOKEN or not answer_text:
-        return "ABSTAIN", answer_text, [], []
+        return "ABSTAIN", config.ABSTAIN_TOKEN, [], []
 
     if not sources_m:
-        return "ABSTAIN", answer_text, [], []
+        return "ABSTAIN", config.ABSTAIN_TOKEN, [], []
 
     cited_raw = [c.strip().strip(".") for c in sources_m.group(1).split(",") if c.strip()]
     cited_raw = [c for c in cited_raw if c.upper() != "NONE"]
+
+    if not cited_raw:
+        return "ABSTAIN", config.ABSTAIN_TOKEN, [], []
+
     valid = [c for c in cited_raw if c in valid_ids]
     invalid = [c for c in cited_raw if c not in valid_ids]
 
-    if not valid:
-        return "ABSTAIN", answer_text, [], invalid
+    if invalid:
+        return "ABSTAIN", config.ABSTAIN_TOKEN, [], invalid
 
-    return "ANSWER", answer_text, valid, invalid
+    return "ANSWER", answer_text, valid, []
 
 
 def _detect_unresolved_current_conflict(passages: list) -> bool:
-    """Metadata-driven guard, not model judgment: if two or more of the given
-    passages are both status current, come from different documents, share
-    the same company, effective_date and section title, and neither document
-    names the other via supersedes/superseded_by, committed metadata gives no
-    precedence between them. Per MANIFEST.md, this must cause abstention
-    rather than a guess, so it is enforced deterministically here rather than
-    left to the generator."""
+    """Bounded, metadata-only guard for this synthetic corpus's fixed
+    frontmatter schema -- not a general contradiction or precedence detector.
+    It triggers exactly when two or more of the given passages are both
+    `status: current`, come from different `doc_id`s, and share an identical
+    (company, effective_date, section_title) key, with neither document
+    naming the other via `supersedes`/`superseded_by`. On that exact key
+    match, committed metadata gives no precedence between them, so this is
+    enforced deterministically here rather than left to the generator. It
+    does not compare the passages' actual claims (two passages that happen to
+    agree still trigger on the same metadata match), does not detect
+    precedence expressed any other way, and says nothing about corpora with a
+    different metadata schema."""
     current = [p for p in passages if p["status"] == "current"]
     for i, a in enumerate(current):
         for b in current[i + 1:]:
@@ -115,8 +139,12 @@ def _detect_unresolved_current_conflict(passages: list) -> bool:
 
 def answer_question(question: str, index: dict, k: int = None) -> Answer:
     retrieved = retrieve(question, index, k=k)
-    valid_ids = {p["id"] for p in retrieved}
     context_passages = retrieved[: config.MAX_CONTEXT_PASSAGES]
+    # Citation validity is checked against what was actually placed in the
+    # prompt, not the broader retrieved set: with k > MAX_CONTEXT_PASSAGES,
+    # a retrieved-but-not-shown passage id must be rejected exactly like a
+    # fabricated one.
+    valid_ids = {p["id"] for p in context_passages}
 
     if _detect_unresolved_current_conflict(context_passages):
         return Answer(

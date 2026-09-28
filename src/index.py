@@ -1,16 +1,35 @@
 """Embedding index: build, persist, and retrieve.
 
-The persisted index records the corpus directory, each passage's content
-hash, and the embedding model name so a stale index (built from an older
-corpus) can be detected rather than silently used.
+The persisted index is hash-bound to the corpus bytes, the embedding model,
+and the chunking scheme (`src.corpus.CHUNK_VERSION`) at build time. Every
+retrieval call re-validates this binding against the live corpus directory
+and the index's own internal structure (`_validate_index_integrity` below),
+so a stale, edited, or corrupted index errors explicitly instead of being
+used silently -- including when the index dict is held in memory and never
+round-tripped through `load_index`.
 """
+import hashlib
 import json
 import math
 from pathlib import Path
 
 from . import config
-from .corpus import load_corpus
+from .corpus import CHUNK_VERSION, corpus_fingerprint, load_corpus
 from .ollama_client import embed
+
+REQUIRED_INDEX_FIELDS = {
+    "corpus_dir", "embed_model", "chunk_version", "corpus_fingerprint",
+    "passage_count", "passages",
+}
+REQUIRED_PASSAGE_FIELDS = {
+    "id", "doc_id", "section_title", "text", "company", "doc_type", "title",
+    "version", "effective_date", "status", "content_hash", "embedding",
+}
+
+
+class IndexIntegrityError(RuntimeError):
+    """The index is missing, stale, structurally malformed, or was built
+    from a different corpus/model/chunking-config than what is live now."""
 
 
 def build_index(corpus_dir: str, embed_model: str = None) -> dict:
@@ -34,12 +53,15 @@ def build_index(corpus_dir: str, embed_model: str = None) -> dict:
                 "supersedes": p.supersedes,
                 "superseded_by": p.superseded_by,
                 "content_hash": p.content_hash,
+                "truncated_at_index": p.truncated_at_index,
                 "embedding": vec,
             }
         )
     return {
         "corpus_dir": corpus_dir,
         "embed_model": embed_model,
+        "chunk_version": CHUNK_VERSION,
+        "corpus_fingerprint": corpus_fingerprint(corpus_dir),
         "passage_count": len(entries),
         "passages": entries,
     }
@@ -49,13 +71,80 @@ def save_index(index: dict, path: str) -> None:
     Path(path).write_text(json.dumps(index), encoding="utf-8")
 
 
+def _validate_index_integrity(index: dict) -> None:
+    missing = REQUIRED_INDEX_FIELDS - index.keys()
+    if missing:
+        raise IndexIntegrityError(f"Index is missing required field(s): {sorted(missing)}")
+
+    if index["chunk_version"] != CHUNK_VERSION:
+        raise IndexIntegrityError(
+            f"Index chunking version {index['chunk_version']!r} does not match the "
+            f"current chunking scheme {CHUNK_VERSION!r}; rebuild the index."
+        )
+
+    if index["embed_model"] != config.EMBED_MODEL:
+        raise IndexIntegrityError(
+            f"Index was built with embedding model {index['embed_model']!r}, but the "
+            f"configured model is {config.EMBED_MODEL!r} (model drift); rebuild the index."
+        )
+
+    try:
+        live_fingerprint = corpus_fingerprint(index["corpus_dir"])
+    except Exception as exc:
+        raise IndexIntegrityError(
+            f"Cannot verify corpus at {index['corpus_dir']!r}: {exc}"
+        ) from exc
+    if live_fingerprint != index["corpus_fingerprint"]:
+        raise IndexIntegrityError(
+            f"Index corpus fingerprint does not match the live corpus directory "
+            f"({index['corpus_dir']!r}); the corpus changed since the index was built. "
+            "Rebuild the index."
+        )
+
+    passages = index["passages"]
+    if len(passages) != index["passage_count"]:
+        raise IndexIntegrityError(
+            f"Index passage_count ({index['passage_count']}) does not match the number "
+            f"of stored passages ({len(passages)})."
+        )
+
+    dim = None
+    for entry in passages:
+        pid = entry.get("id", "<unknown>")
+        missing_fields = REQUIRED_PASSAGE_FIELDS - entry.keys()
+        if missing_fields:
+            raise IndexIntegrityError(f"Passage {pid!r} is missing field(s): {sorted(missing_fields)}")
+
+        expected_hash = hashlib.sha256(entry["text"].encode("utf-8")).hexdigest()[:16]
+        if entry["content_hash"] != expected_hash:
+            raise IndexIntegrityError(
+                f"Passage {pid!r} content hash does not match its stored text "
+                "(edited or corrupted index)."
+            )
+
+        emb = entry["embedding"]
+        if not isinstance(emb, list) or not emb:
+            raise IndexIntegrityError(f"Passage {pid!r} has an empty or malformed embedding.")
+        if dim is None:
+            dim = len(emb)
+        elif len(emb) != dim:
+            raise IndexIntegrityError(
+                f"Passage {pid!r} embedding dimension {len(emb)} does not match the "
+                f"index's dimension {dim}."
+            )
+        if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in emb):
+            raise IndexIntegrityError(f"Passage {pid!r} embedding contains non-finite or non-numeric values.")
+
+
 def load_index(path: str) -> dict:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
             f"Index not found at {path}. Run `python -m src.build_index` first."
         )
-    return json.loads(p.read_text(encoding="utf-8"))
+    index = json.loads(p.read_text(encoding="utf-8"))
+    _validate_index_integrity(index)
+    return index
 
 
 def _cosine(a: list, b: list) -> float:
@@ -68,6 +157,7 @@ def _cosine(a: list, b: list) -> float:
 
 
 def retrieve(question: str, index: dict, k: int = None, embed_model: str = None) -> list:
+    _validate_index_integrity(index)
     k = k or config.RETRIEVAL_K
     embed_model = embed_model or index.get("embed_model", config.EMBED_MODEL)
     qvec = embed(question, model=embed_model)
