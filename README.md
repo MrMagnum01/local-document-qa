@@ -7,9 +7,9 @@ they used, or explicitly abstain — an uncited "answer" is never presented
 as a success.
 
 **Role:** Synthetic portfolio demonstration, implemented with AI coding
-agents; independent review pending. No client data or client work.
+agents.  No client data or client work.
 
-**Independent review:** cleared by the company's reviewer at commit 65ac5a4 (scope: bounded synthetic demo; local models, no real documents or production use). Later commits are not covered by that review.
+**Independent review:** cleared by the company’s separate AI reviewer at commit 65ac5a4 (scope: bounded synthetic demo; local models, no real documents or production use). Later commits are not covered by that review.
 
 Relevant Upwork job types: "RAG chatbot over company documents", "AI
 document Q&A", "local/private LLM assistant".
