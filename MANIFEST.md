@@ -198,7 +198,7 @@ no-quiet-tuning rule.
   not to any new generation pass. The round-2 review's scoring finding
   (numeric-only unsupported-claim filtering does not assess atomic support)
   is addressed by `eval/adjudication-2026-09-28.csv`, a bounded manual
-  reviewer adjudication of the retained 40 answers, reported alongside —
+  AI-builder adjudication (not human, not independent validation) of the retained 40 answers, reported alongside —
   not in place of — the rule score; see `README.md`.
 
 ## Reproduction
