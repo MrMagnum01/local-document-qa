@@ -115,7 +115,7 @@ gold atomic facts — discounting a negated alias mention — plus a
 forbidden-term check and a bounded unsupported-numeric/monetary-claim check.
 **This is pattern matching, not a semantic judge of whether an answer's
 claims are actually supported by its cited passages** — no automatic
-scorer in this repo evaluates support; only a human reviewer did (below).
+scorer in this repo evaluates support; the AI-builder adjudication below is a separate check by the AI agent that built the demo, not a human or independent validation.
 The rule check both over- and under-fires: it misses paraphrases (e.g. "not
 counted against" for the gold alias "not deducted"), misses forbidden
 claims split by an inserted word (e.g. "no per-person cap" vs. the
@@ -123,9 +123,9 @@ forbidden term "no cap"), and penalizes verbatim-sourced text that happens
 to contain a bare number not present in the gold aliases. See
 `eval/scorer.py` for the code.
 
-**Reviewer adjudication of the retained 40 answers**
+**AI-builder adjudication of the retained 40 answers** (not human, not independent validation)
 (`eval/adjudication-2026-09-28.csv`, 2026-09-28 round-2 review, group 2): a
-human read every retained answer against its gold facts and citations and
+the AI coding agent that built this demo read every retained answer against its gold facts and citations and
 labelled it supported / partial / unsupported / contradictory /
 correctly-abstained, with a reason, independent of the rule scorer.
 Adjudicated agreement on the 32 answerable questions — an answer counted
@@ -138,9 +138,9 @@ amounts but dodge the exact-substring forbidden-term check by one inserted
 word). The full reasoning for all 40 rows, including 5 of 8 unanswerable
 questions correctly abstained and 3 where the system should have abstained
 but fabricated or misattributed an answer instead, is in the CSV. This
-adjudication is a bounded, one-time manual review of these specific 40
+adjudication is a bounded, one-time AI-builder review of these specific 40
 retained outputs, not a repeatable automatic judge — a future evaluation
-run has no equivalent unless re-adjudicated by hand.
+run has no equivalent unless it is re-adjudicated. No human has reviewed these labels; the separate AI reviewer spot-checked the arithmetic (20/32) and two rows (q014, q015) only.
 
 No positive accuracy threshold was required for this demo to ship: the
 generator is a small (1.5B parameter) CPU-only model, and its answer
@@ -226,7 +226,7 @@ data/fixtures/         injection + no-precedence-conflict safety fixtures
 src/                   corpus loading, embedding/retrieval, QA pipeline, sanitization
 eval/                  frozen questions, scorer, eval runner, results/ (retained),
                        results-rescored-*/ (re-scored retained answers),
-                       adjudication-2026-09-28.csv (reviewer adjudication of the
+                       adjudication-2026-09-28.csv (AI-builder adjudication of the
                        retained 40 answers, see "Results" above)
 tests/                 unit + safety tests
 MANIFEST.md            frozen corpus/model/config/prompt manifest
