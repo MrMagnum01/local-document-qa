@@ -55,23 +55,31 @@ python3 -m src.build_index          # builds data/index.json from data/corpus/
 
 ## Running the tests
 ```bash
-python3 -m unittest tests.test_corpus tests.test_scorer tests.test_qa   # fast, no network
-python3 -m unittest tests.test_safety                                   # needs Ollama, ~30-60s on CPU
+python3 -m unittest tests.test_corpus tests.test_scorer tests.test_qa \
+                     tests.test_index tests.test_local_bounds tests.test_run_eval  # fast, no network
+python3 -m unittest tests.test_safety                                              # needs Ollama, ~30-60s on CPU
 ```
 
 ## Running the frozen evaluation
 Already run once; `eval/results/` holds the original 40-answer run and is
-retained as evidence — `eval/run_eval.py`'s default entry point refuses to
-overwrite it:
+retained as evidence. **New generation-evaluation runs are currently
+disabled** (2026-09-28 round-2 review, group 6): the pre-run freeze
+`eval/run_eval.py` wrote at generation time bound tags/questions/scorer,
+not a true pre-run binding of exact model/tokenizer/artifact identity,
+runtime, and sources/prompts/config before generation starts, and a
+labelled run directory could still be overwritten by re-running the same
+`--label`. `main()` now refuses immediately, on both the default and
+`--label` paths, until a reviewed successor adds that freeze:
 ```bash
-python3 -m eval.run_eval                      # only works once; then refuses
-python3 -m eval.run_eval --label <name>        # a new, separately labelled generation run
-python3 -m eval.run_eval --rescore-retained <name>  # re-score eval/results/ with the current
-                                                     # scorer, no model call, no regeneration
+python3 -m eval.run_eval                            # DISABLED: refuses with a clear message
+python3 -m eval.run_eval --label <name>              # DISABLED: refuses with a clear message
+python3 -m eval.run_eval --rescore-retained <name>   # NOT disabled: re-score eval/results/ with the
+                                                      # current scorer, no model call, no regeneration
 ```
 Per `MANIFEST.md`, a scorer fix gets a labelled re-score of the retained
 answers (above), never a silent overwrite of committed numbers; a genuinely
-new generation pass gets its own labelled run directory.
+new generation pass is not available through this entry point at all right
+now.
 
 ## Results, on this synthetic set
 See `eval/results/report.md` / `eval/results/scores.json` for the original
@@ -104,11 +112,37 @@ vacuous safety score.
 
 "Rule-scored answer agreement" is keyword/alias matching against committed
 gold atomic facts — discounting a negated alias mention — plus a
-forbidden-term check and a bounded unsupported-numeric/monetary-claim check;
-a bounded, explicit adjudication protocol, still a proxy for correctness,
-not full semantic verification (non-numeric unsupported additions remain a
-known gap); see `eval/scorer.py` and the notes in the report files above. No
-positive accuracy threshold was required for this demo to ship: the
+forbidden-term check and a bounded unsupported-numeric/monetary-claim check.
+**This is pattern matching, not a semantic judge of whether an answer's
+claims are actually supported by its cited passages** — no automatic
+scorer in this repo evaluates support; only a human reviewer did (below).
+The rule check both over- and under-fires: it misses paraphrases (e.g. "not
+counted against" for the gold alias "not deducted"), misses forbidden
+claims split by an inserted word (e.g. "no per-person cap" vs. the
+forbidden term "no cap"), and penalizes verbatim-sourced text that happens
+to contain a bare number not present in the gold aliases. See
+`eval/scorer.py` for the code.
+
+**Reviewer adjudication of the retained 40 answers**
+(`eval/adjudication-2026-09-28.csv`, 2026-09-28 round-2 review, group 2): a
+human read every retained answer against its gold facts and citations and
+labelled it supported / partial / unsupported / contradictory /
+correctly-abstained, with a reason, independent of the rule scorer.
+Adjudicated agreement on the 32 answerable questions — an answer counted
+correct only if its content is supported **and** grounded in a cited gold
+passage — is **62.5% (20/32)**, alongside the rule score's 50.0% (16/32).
+These numbers diverge for different reasons in both directions: the rule
+scorer both over-penalizes (paraphrases, verbatim-but-flagged numbers) and
+under-catches (q014, q015 directly contradict the source cap/approval
+amounts but dodge the exact-substring forbidden-term check by one inserted
+word). The full reasoning for all 40 rows, including 5 of 8 unanswerable
+questions correctly abstained and 3 where the system should have abstained
+but fabricated or misattributed an answer instead, is in the CSV. This
+adjudication is a bounded, one-time manual review of these specific 40
+retained outputs, not a repeatable automatic judge — a future evaluation
+run has no equivalent unless re-adjudicated by hand.
+
+No positive accuracy threshold was required for this demo to ship: the
 generator is a small (1.5B parameter) CPU-only model, and its answer
 quality is exactly what is reported above — the retrieval,
 citation-enforcement, and abstention-safety pipeline is the part of this
@@ -138,27 +172,51 @@ demo with the stronger claim.
   shown to the model in every prompt. A bounded, metadata-only guard scoped
   to this synthetic corpus's fixed schema — not a general contradiction
   detector — deterministically abstains when two different, unlinked
-  `status: current` documents share an identical (company, effective_date,
-  section_title) key (`src/qa.py::_detect_unresolved_current_conflict`); it
-  does not compare the passages' actual claims and says nothing about a
-  corpus with a different metadata schema.
-- **The index is hash-bound to the corpus, embedding model, and chunking
-  scheme.** Every `retrieve()` call — including on an index already held in
-  memory — re-validates the live corpus bytes, embedding-model identity,
-  chunking version, passage count, per-passage content hash, and embedding
-  dimension/finiteness, raising `IndexIntegrityError` on any mismatch
-  instead of retrieving against a stale, edited, or corrupted index
+  `status: current` documents share an identical (company, section_title)
+  topic/authority key (`src/qa.py::_detect_unresolved_current_conflict`).
+  `effective_date` is deliberately **not** part of that key: a later date
+  on an otherwise-identical, unlinked document is operator-supplied prose,
+  not a verified precedence signal, so it never breaks the tie on its own —
+  only an explicit `supersedes`/`superseded_by` link does (2026-09-28
+  round-2 review, group 4). This guard does not compare the passages'
+  actual claims and says nothing about a corpus with a different metadata
+  schema.
+- **The index is hash-bound to the corpus, embedding model, chunking
+  scheme, and query-time embedding shape.** Every `retrieve()` call —
+  including on an index already held in memory — re-validates the live
+  corpus bytes, embedding-model identity, chunking version, passage count,
+  and per-passage embedding dimension/finiteness. The per-passage binding
+  hash covers the passage's **text and its bound metadata together**
+  (company, status, supersedes/superseded_by, version, effective_date, ...)
+  so editing metadata independently of text is caught the same way as
+  editing text (`src/corpus.py::passage_binding_hash`); a caller-supplied
+  `embed_model` that differs from the index's bound model is refused rather
+  than silently scoring against embeddings it did not produce; and the
+  query embedding itself is validated (non-empty, finite, dimension-matched
+  to the index) before scoring, rather than silently truncated by `zip()`.
+  Any mismatch raises `IndexIntegrityError` instead of retrieving against a
+  stale, edited, corrupted, or model/dimension-mismatched index
   (`src/index.py`).
-- **Inference stays on loopback.** `src/ollama_client.py` refuses any URL
-  whose host is not `127.0.0.1`/`localhost`/`::1`, ignores inherited
-  `HTTP_PROXY`/`HTTPS_PROXY`, refuses to follow HTTP redirects, bounds every
-  response to 10 MB, and validates response shape before use.
+- **Inference stays on loopback, and responses are shape-validated.**
+  `src/ollama_client.py` refuses any URL whose host is not
+  `127.0.0.1`/`localhost`/`::1`, ignores inherited `HTTP_PROXY`/
+  `HTTPS_PROXY`, refuses to follow HTTP redirects, bounds every response to
+  10 MB, and requires the parsed JSON body to be an object (not e.g. a bare
+  array) before reading a field out of it; embedding vectors are rejected
+  if any element is non-finite (NaN/±inf), not just non-numeric.
 - **Corpus access and size are bounded**: files must resolve inside the
   declared corpus directory (no path escapes or symlinks pointing outside
   it), zero-byte/duplicate-id/missing-frontmatter/oversized documents and
   oversized corpora fail as categorized errors rather than being silently
   skipped or read unbounded, and passage/context sizes are capped
-  (`src/config.py`, `src/corpus.py`).
+  (`src/config.py`, `src/corpus.py`). `corpus_fingerprint` — called on every
+  retrieval — enforces the same per-file byte bound as corpus loading,
+  rather than hashing an oversized file whole.
+- **New generation-evaluation runs are disabled.** `eval/run_eval.py`'s
+  `main()` refuses immediately, on both the default and `--label` paths,
+  until a reviewed successor implements a genuine pre-run freeze of exact
+  model/tokenizer/artifact identity, runtime, and sources/prompts/config
+  (2026-09-28 round-2 review, group 6). `--rescore-retained` is unaffected.
 
 ## Repository layout
 ```
@@ -167,7 +225,9 @@ data/dev_corpus/       small corpus used only for prompt tuning, never scored
 data/fixtures/         injection + no-precedence-conflict safety fixtures
 src/                   corpus loading, embedding/retrieval, QA pipeline, sanitization
 eval/                  frozen questions, scorer, eval runner, results/ (retained),
-                       results-rescored-*/ (re-scored retained answers)
+                       results-rescored-*/ (re-scored retained answers),
+                       adjudication-2026-09-28.csv (reviewer adjudication of the
+                       retained 40 answers, see "Results" above)
 tests/                 unit + safety tests
 MANIFEST.md            frozen corpus/model/config/prompt manifest
 LICENSES.md            dependency and model-weight licenses

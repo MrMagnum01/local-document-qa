@@ -60,6 +60,48 @@ class TestIndexIntegrity(unittest.TestCase):
         with self.assertRaises(index.IndexIntegrityError):
             self._retrieve(altered)
 
+    def test_edited_passage_metadata_with_stale_hash_raises(self):
+        # 2026-09-28 review round 2, group 1: the index must be bound to
+        # metadata, not just text -- editing status/company/supersedes
+        # independently of the text must be caught the same way.
+        altered = copy.deepcopy(self.idx)
+        altered["passages"][0]["status"] = "current"
+        altered["passages"][0]["company"] = "FAKE"
+        altered["passages"][0]["supersedes"] = "invented"
+        with self.assertRaises(index.IndexIntegrityError):
+            self._retrieve(altered)
+
+    def test_query_time_embed_model_override_raises(self):
+        # A per-call embed_model that differs from the index's bound model
+        # must be refused, not silently used to score against embeddings it
+        # did not produce (2026-09-28 review round 2, group 1).
+        with self.assertRaises(index.IndexIntegrityError):
+            with patch("src.index.embed", return_value=FAKE_EMBEDDING):
+                index.retrieve("q", self.idx, k=1, embed_model="different-model")
+
+    def test_query_time_embed_model_matching_bound_model_is_allowed(self):
+        with patch("src.index.embed", return_value=FAKE_EMBEDDING):
+            results = index.retrieve("q", self.idx, k=1, embed_model=self.idx["embed_model"])
+        self.assertEqual(len(results), 1)
+
+    def test_wrong_dimension_query_embedding_raises(self):
+        # The index's passages are 3-dimensional (FAKE_EMBEDDING); a
+        # 1-dimensional query vector must be refused before scoring, not
+        # silently truncated by zip() (2026-09-28 review round 2, group 1).
+        with self.assertRaises(index.IndexIntegrityError):
+            with patch("src.index.embed", return_value=[1.0]):
+                index.retrieve("q", self.idx, k=1)
+
+    def test_nonfinite_query_embedding_raises(self):
+        with self.assertRaises(index.IndexIntegrityError):
+            with patch("src.index.embed", return_value=[0.1, float("nan"), 0.3]):
+                index.retrieve("q", self.idx, k=1)
+
+    def test_empty_query_embedding_raises(self):
+        with self.assertRaises(index.IndexIntegrityError):
+            with patch("src.index.embed", return_value=[]):
+                index.retrieve("q", self.idx, k=1)
+
     def test_changed_corpus_bytes_on_disk_raises(self):
         (self.corpus_dir / "doc.md").write_text(DOC + "\nExtra line.\n")
         with self.assertRaises(index.IndexIntegrityError):

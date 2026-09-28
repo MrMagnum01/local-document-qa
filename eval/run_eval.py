@@ -1,19 +1,21 @@
-"""Run the frozen evaluation set, or re-score retained answers, and write
-immutable, labelled outputs.
+"""Re-score retained answers and write immutable, labelled outputs. NEW
+generation-evaluation runs are currently DISABLED -- see
+GENERATION_DISABLED_MESSAGE below (2026-09-28 review round 2, group 6).
 
 Usage:
-  python -m eval.run_eval                 # first/only run: writes eval/results/
-  python -m eval.run_eval --label <name>   # a NEW generation run: eval/results-<name>/
+  python -m eval.run_eval                 # DISABLED: refuses with a clear message
+  python -m eval.run_eval --label <name>   # DISABLED: refuses with a clear message
   python -m eval.run_eval --rescore-retained <name>
       # re-score the RETAINED eval/results/answers.jsonl with the CURRENT
       # eval/scorer.py, writing eval/results-rescored-<name>/ alongside both
       # the old and new aggregate numbers. Calls no model and does not touch
-      # eval/results/.
+      # eval/results/. This path is NOT disabled -- it never generates.
 
 Per MANIFEST.md: once `eval/results/` is committed as recorded evidence, this
 script refuses to overwrite it. A discovered scorer defect gets a new
-labelled re-score (above); a genuinely new generation run gets a new labelled
-run directory -- never a silent overwrite of retained evidence.
+labelled re-score (above); a genuinely new generation run is not currently
+possible through this entry point at all -- never a silent overwrite of
+retained evidence.
 """
 import argparse
 import hashlib
@@ -195,18 +197,33 @@ def _write_results(target_dir: Path, system_answers, system_results, system_agg,
     write_report(target_dir / "report.md", system_agg, baseline_agg, system_results, n_questions)
 
 
-def main(label: str = None):
-    """Run the full pipeline (retrieval + local generation) over the frozen
-    question set. Refuses to overwrite `eval/results/` once it holds
-    retained evidence; pass --label for any new generation run."""
+GENERATION_DISABLED_MESSAGE = (
+    "New generation-evaluation runs are disabled (2026-09-28 review round 2, group 6): "
+    "the pre-run freeze this script wrote at generation time bound only tags/questions/"
+    "scorer at write time, not a true pre-run binding of exact model/tokenizer/artifact "
+    "identity, runtime, and sources/prompts/config before generation starts -- and a "
+    "labelled run directory could still be overwritten by re-running the same --label. "
+    "This entry point stays disabled until a reviewed successor provides that pre-run "
+    "freeze. Use `--rescore-retained <name>` to re-score the RETAINED eval/results/ "
+    "answers with the current scorer instead -- that path calls no model and never "
+    "touches eval/results/. See launch/demo-local-document-qa.md for status."
+)
+
+
+def _run_generation(label: str = None):
+    """The actual generation-evaluation pipeline: retrieval + local
+    generation over the frozen question set, written to a target directory
+    named by `label`. NOT called by `main` while generation is disabled
+    (see `main`/`GENERATION_DISABLED_MESSAGE`) -- kept intact for a
+    reviewed successor to re-enable once it adds a genuine pre-run freeze,
+    rather than deleted and rewritten from scratch later."""
     target_dir = RESULTS_DIR if label is None else RESULTS_DIR.parent / f"results-{label}"
-    if target_dir == RESULTS_DIR and RESULTS_DIR.exists() and any(RESULTS_DIR.iterdir()):
+    if target_dir.exists() and any(target_dir.iterdir()):
         raise SystemExit(
-            f"{RESULTS_DIR} already holds retained evidence (committed answers/scores). "
-            "Refusing to overwrite it. Pass `--label <name>` to write a new, separately "
-            f"labelled run to {RESULTS_DIR.parent / 'results-<name>'} instead, or use "
-            "`--rescore-retained <name>` if only the scorer changed and the answers "
-            "themselves do not need regenerating."
+            f"{target_dir} already holds retained evidence (committed answers/scores). "
+            "Refusing to overwrite it. Pass a different `--label <name>` for a new, "
+            f"separately labelled run, or use `--rescore-retained <name>` if only the "
+            "scorer changed and the answers themselves do not need regenerating."
         )
 
     questions = load_questions()
@@ -220,6 +237,15 @@ def main(label: str = None):
     _write_results(target_dir, system_answers, system_results, system_agg,
                     baseline_results, baseline_agg, len(questions))
     print(f"Evaluated {len(questions)} questions. See {target_dir}/report.md")
+
+
+def main(label: str = None):
+    """Generation-evaluation entry point. DISABLED (2026-09-28 review round
+    2, group 6): always refuses, on both the default `eval/results/` path
+    and any `--label` path, before touching the model, the corpus, or
+    disk -- see GENERATION_DISABLED_MESSAGE for why. Use
+    `--rescore-retained` to work with retained evidence instead."""
+    raise SystemExit(GENERATION_DISABLED_MESSAGE)
 
 
 def rescore_retained(label: str, source_dir: Path = RESULTS_DIR):
@@ -266,7 +292,7 @@ def rescore_retained(label: str, source_dir: Path = RESULTS_DIR):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--label", help="write a NEW generation run to eval/results-<label>/ instead of eval/results/")
+    parser.add_argument("--label", help="DISABLED: would write a NEW generation run to eval/results-<label>/; refuses instead")
     parser.add_argument("--rescore-retained", metavar="LABEL",
                          help="re-score eval/results/answers.jsonl (retained) with the current scorer "
                               "into eval/results-rescored-LABEL/; no model call, no regeneration")

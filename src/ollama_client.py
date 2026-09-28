@@ -11,6 +11,7 @@ read, and each response's shape is validated before use. The models must
 already have been pulled (setup-time step, see README).
 """
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -63,17 +64,37 @@ def _post(path: str, payload: dict) -> dict:
             f"Response from {url} exceeded the {config.MAX_OLLAMA_RESPONSE_BYTES}-byte bound; refusing to load it."
         )
     try:
-        return json.loads(body.decode("utf-8"))
+        parsed = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise OllamaError(f"Malformed JSON response from {url}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise OllamaError(
+            f"Malformed response from {url}: expected a JSON object, got {type(parsed).__name__}"
+        )
+    return parsed
+
+
+def _require_mapping(resp, url_desc: str) -> dict:
+    """Defense in depth against a caller-supplied `_post` (e.g. a mocked
+    response in a test) returning a non-mapping shape that `_post` itself
+    would normally have already rejected."""
+    if not isinstance(resp, dict):
+        raise OllamaError(
+            f"Malformed response from {url_desc}: expected a JSON object, got {type(resp).__name__}"
+        )
+    return resp
 
 
 def embed(text: str, model: str = None) -> list:
     model = model or config.EMBED_MODEL
-    resp = _post("/api/embeddings", {"model": model, "prompt": text})
+    resp = _require_mapping(_post("/api/embeddings", {"model": model, "prompt": text}), "/api/embeddings")
     vec = resp.get("embedding")
-    if not isinstance(vec, list) or not vec or not all(isinstance(x, (int, float)) for x in vec):
-        raise OllamaError(f"Malformed or missing embedding in response: {resp}")
+    if (
+        not isinstance(vec, list)
+        or not vec
+        or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in vec)
+    ):
+        raise OllamaError(f"Malformed, missing, or non-finite embedding in response: {resp}")
     return vec
 
 
@@ -87,7 +108,7 @@ def generate(prompt: str, model: str = None, system: str = None, options: dict =
     }
     if system:
         payload["system"] = system
-    resp = _post("/api/generate", payload)
+    resp = _require_mapping(_post("/api/generate", payload), "/api/generate")
     text = resp.get("response")
     if not isinstance(text, str):
         raise OllamaError(f"Malformed or missing 'response' field in generation output: {resp}")

@@ -2,8 +2,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from src.corpus import load_corpus, CorpusError
+from src.corpus import load_corpus, corpus_fingerprint, CorpusError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,6 +50,14 @@ class TestCorpusLoading(unittest.TestCase):
             )
             with self.assertRaises(CorpusError):
                 load_corpus(tmp)
+
+    def test_fingerprint_enforces_per_file_bound(self):
+        # 2026-09-28 review round 2, group 5: corpus_fingerprint is called
+        # on every retrieval and must not read a whole file unbounded just
+        # because it's only hashing, not loading, that file.
+        with patch("src.corpus.config.MAX_CORPUS_FILE_BYTES", 1):
+            with self.assertRaises(CorpusError):
+                corpus_fingerprint(str(REPO_ROOT / "data" / "corpus"))
 
     def test_path_escape_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

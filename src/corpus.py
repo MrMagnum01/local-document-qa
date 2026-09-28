@@ -8,6 +8,7 @@ directory: no path escapes, and symlinks pointing outside the corpus root
 are rejected.
 """
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,27 @@ CHUNK_VERSION = "section-v1-4000char-noOverlap"
 
 class CorpusError(ValueError):
     pass
+
+
+def passage_binding_hash(*, doc_id, section_title, text, company, doc_type, title,
+                          version, effective_date, status, supersedes, superseded_by) -> str:
+    """Canonical hash binding a passage's text AND its bound metadata fields
+    (company, status, supersedes/superseded_by, version, effective_date, ...)
+    together. Editing any one of these independently of the others -- e.g.
+    flipping `status` to "current" or rewriting `supersedes` without
+    touching `text` -- changes this hash exactly like editing the text
+    would, so index integrity checks (`src/index.py`) catch metadata
+    tampering, not just text tampering."""
+    canonical = json.dumps(
+        {
+            "doc_id": doc_id, "section_title": section_title, "text": text,
+            "company": company, "doc_type": doc_type, "title": title,
+            "version": version, "effective_date": effective_date, "status": status,
+            "supersedes": supersedes, "superseded_by": superseded_by,
+        },
+        sort_keys=True, ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -46,7 +68,12 @@ class Passage:
 
     def __post_init__(self):
         if not self.content_hash:
-            self.content_hash = hashlib.sha256(self.text.encode("utf-8")).hexdigest()[:16]
+            self.content_hash = passage_binding_hash(
+                doc_id=self.doc_id, section_title=self.section_title, text=self.text,
+                company=self.company, doc_type=self.doc_type, title=self.title,
+                version=self.version, effective_date=self.effective_date, status=self.status,
+                supersedes=self.supersedes, superseded_by=self.superseded_by,
+            )
 
 
 def _slug(text: str) -> str:
@@ -167,13 +194,21 @@ def corpus_fingerprint(corpus_dir: str) -> str:
     detection: sha256 over the sorted (filename, sha256(file bytes)) pairs of
     every ``*.md`` file directly under ``corpus_dir``. Two directories with the
     same fingerprint have byte-identical source documents; any edit, addition,
-    removal, or move changes it."""
+    removal, or move changes it. Each file is subject to the same
+    ``MAX_CORPUS_FILE_BYTES`` bound as `load_corpus`, so this cannot be used
+    to force an unbounded whole-file read on every retrieval call."""
     root = Path(corpus_dir)
     if not root.is_dir():
         raise CorpusError(f"Corpus directory does not exist: {corpus_dir}")
     parts = []
     for path in sorted(root.glob("*.md")):
         _resolve_within(root, path)
+        size = path.stat().st_size
+        if size > config.MAX_CORPUS_FILE_BYTES:
+            raise CorpusError(
+                f"{path}: {size} bytes exceeds the {config.MAX_CORPUS_FILE_BYTES}-byte "
+                "per-document bound; refusing to fingerprint an oversized file"
+            )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         parts.append(f"{path.name}:{digest}")
     if not parts:

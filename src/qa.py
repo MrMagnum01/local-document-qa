@@ -113,21 +113,31 @@ def _detect_unresolved_current_conflict(passages: list) -> bool:
     frontmatter schema -- not a general contradiction or precedence detector.
     It triggers exactly when two or more of the given passages are both
     `status: current`, come from different `doc_id`s, and share an identical
-    (company, effective_date, section_title) key, with neither document
+    (company, section_title) topic/authority key, with neither document
     naming the other via `supersedes`/`superseded_by`. On that exact key
-    match, committed metadata gives no precedence between them, so this is
-    enforced deterministically here rather than left to the generator. It
-    does not compare the passages' actual claims (two passages that happen to
-    agree still trigger on the same metadata match), does not detect
-    precedence expressed any other way, and says nothing about corpora with a
-    different metadata schema."""
+    match, committed metadata gives no verified precedence between them, so
+    this is enforced deterministically here rather than left to the
+    generator.
+
+    `effective_date` is deliberately NOT part of the key and is never used
+    to break the tie: two unlinked `current` documents about the same topic
+    with different dates are exactly as unresolved as two with the same
+    date. A later `effective_date` string is operator-supplied prose, not a
+    verified precedence signal -- only an explicit `supersedes`/
+    `superseded_by` link establishes authority in this corpus (2026-09-28
+    review, group 4).
+
+    It does not compare the passages' actual claims (two passages that
+    happen to agree still trigger on the same metadata match), does not
+    detect precedence expressed any other way, and says nothing about
+    corpora with a different metadata schema."""
     current = [p for p in passages if p["status"] == "current"]
     for i, a in enumerate(current):
         for b in current[i + 1:]:
             if a["doc_id"] == b["doc_id"]:
                 continue
-            if (a["company"], a["effective_date"], a["section_title"].strip().lower()) != (
-                b["company"], b["effective_date"], b["section_title"].strip().lower()
+            if (a["company"], a["section_title"].strip().lower()) != (
+                b["company"], b["section_title"].strip().lower()
             ):
                 continue
             linked = a["doc_id"] in {b.get("supersedes"), b.get("superseded_by")} or \

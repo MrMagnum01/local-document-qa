@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src import config
+from src import config, ollama_client
 from src.corpus import CorpusError, load_corpus
 from src.ollama_client import OllamaError, _require_loopback
 
@@ -65,6 +65,32 @@ class TestNoProxyNoRedirect(unittest.TestCase):
         handler = _NoRedirectHandler()
         with self.assertRaises(OllamaError):
             handler.redirect_request(None, None, 302, "Found", {}, "http://attacker.example/steal")
+
+
+class TestResponseShapeValidation(unittest.TestCase):
+    """2026-09-28 review round 2, group 5: a non-object JSON response must
+    raise a named OllamaError, not an uncategorized AttributeError, and a
+    NaN embedding element must be rejected rather than returned."""
+
+    def test_nonobject_embed_response_raises_categorized_error(self):
+        with patch.object(ollama_client, "_post", return_value=[]):
+            with self.assertRaises(OllamaError):
+                ollama_client.embed("q")
+
+    def test_nonobject_generate_response_raises_categorized_error(self):
+        with patch.object(ollama_client, "_post", return_value=["not", "a", "dict"]):
+            with self.assertRaises(OllamaError):
+                ollama_client.generate("prompt")
+
+    def test_nan_embedding_element_rejected(self):
+        with patch.object(ollama_client, "_post", return_value={"embedding": [float("nan")]}):
+            with self.assertRaises(OllamaError):
+                ollama_client.embed("q")
+
+    def test_infinite_embedding_element_rejected(self):
+        with patch.object(ollama_client, "_post", return_value={"embedding": [float("inf")]}):
+            with self.assertRaises(OllamaError):
+                ollama_client.embed("q")
 
 
 class TestCorpusBounds(unittest.TestCase):

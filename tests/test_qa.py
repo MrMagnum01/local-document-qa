@@ -66,20 +66,26 @@ def _passage(id_, doc_id, status="current", company="Acme", effective_date="2026
 
 class TestUnresolvedCurrentConflict(unittest.TestCase):
     """Direct unit tests for the bounded metadata-only precedence guard
-    (2026-09-28 review, group 4): it fires on an exact
-    (company, effective_date, section_title) match between two different,
-    unlinked `status: current` documents, and only then."""
+    (2026-09-28 review round 2, group 4): it fires on an exact
+    (company, section_title) topic match between two different, unlinked
+    `status: current` documents, and only then. `effective_date` is
+    deliberately excluded from the key: a later date is not, on its own, a
+    verified precedence signal in this corpus."""
 
     def test_true_conflict_same_company_date_heading_no_link(self):
         passages = [_passage("a#hours", "doc-a"), _passage("b#hours", "doc-b")]
         self.assertTrue(_detect_unresolved_current_conflict(passages))
 
-    def test_no_conflict_when_effective_dates_differ(self):
+    def test_conflict_when_effective_dates_differ_but_topic_unlinked(self):
+        # Round-2 fix: a newer effective_date on an otherwise-identical,
+        # unlinked current document must NOT be treated as implicit
+        # precedence -- this is still an unresolved conflict (Astra
+        # probe: unlinked_different_date_conflict).
         passages = [
             _passage("a#hours", "doc-a", effective_date="2026-01-01"),
             _passage("b#hours", "doc-b", effective_date="2026-02-01"),
         ]
-        self.assertFalse(_detect_unresolved_current_conflict(passages))
+        self.assertTrue(_detect_unresolved_current_conflict(passages))
 
     def test_no_conflict_when_section_titles_differ(self):
         passages = [

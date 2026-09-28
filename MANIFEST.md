@@ -184,6 +184,22 @@ no-quiet-tuning rule.
   additional independent pre-evaluation hash evidence beyond that commit is
   available. The original `eval/results/` should be read as **post-development
   evidence from that commit**, not a blind prospective holdout.
+- A second review round (`~/vault/40-sessions/2026-09-28-astra-local-document-qa-r2-review.md`)
+  found that the round-1 `_provenance_snapshot` recorded tags/questions/
+  scorer at write time but did not enforce a true *pre-run* freeze of exact
+  model/tokenizer/artifact identity, runtime, and sources/prompts/config
+  before generation starts, and that a labelled run directory could still be
+  overwritten by re-running the same `--label`. `eval/run_eval.py`'s
+  `main()` (both the default and `--label` paths) is now **disabled** —
+  it refuses immediately with a clear message — until a reviewed successor
+  adds that pre-run freeze; `--rescore-retained` is unaffected; it still
+  calls no model and never touches `eval/results/`. This release is scoped
+  to the retained `eval/results/` and `eval/results-rescored-*/` evidence,
+  not to any new generation pass. The round-2 review's scoring finding
+  (numeric-only unsupported-claim filtering does not assess atomic support)
+  is addressed by `eval/adjudication-2026-09-28.csv`, a bounded manual
+  reviewer adjudication of the retained 40 answers, reported alongside —
+  not in place of — the rule score; see `README.md`.
 
 ## Reproduction
 ```
@@ -191,13 +207,12 @@ ollama pull qwen2.5:1.5b-instruct
 ollama pull all-minilm:33m
 python3 -m src.build_index data/corpus data/index.json
 
-# First run only (writes eval/results/, retained thereafter):
+# Generation runs are DISABLED as of the round-2 review (both of these
+# refuse immediately with a clear message; see "Frozen evidence" above):
 python3 -m eval.run_eval
-
-# Any later generation run (never overwrites eval/results/):
 python3 -m eval.run_eval --label <name>
 
 # Re-score the retained eval/results/answers.jsonl with the current scorer,
-# without calling the model or touching eval/results/:
+# without calling the model or touching eval/results/ (NOT disabled):
 python3 -m eval.run_eval --rescore-retained <name>
 ```

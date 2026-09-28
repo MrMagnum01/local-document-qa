@@ -14,7 +14,7 @@ import math
 from pathlib import Path
 
 from . import config
-from .corpus import CHUNK_VERSION, corpus_fingerprint, load_corpus
+from .corpus import CHUNK_VERSION, corpus_fingerprint, load_corpus, passage_binding_hash
 from .ollama_client import embed
 
 REQUIRED_INDEX_FIELDS = {
@@ -71,7 +71,12 @@ def save_index(index: dict, path: str) -> None:
     Path(path).write_text(json.dumps(index), encoding="utf-8")
 
 
-def _validate_index_integrity(index: dict) -> None:
+def _validate_index_integrity(index: dict) -> int:
+    """Raise `IndexIntegrityError` on any structural, staleness, or binding
+    problem; otherwise return the index's passage embedding dimension (0 if
+    the index has no passages) so callers that already paid for this
+    validation (`retrieve`) can reuse it for query-vector dimension
+    checking instead of re-deriving it."""
     missing = REQUIRED_INDEX_FIELDS - index.keys()
     if missing:
         raise IndexIntegrityError(f"Index is missing required field(s): {sorted(missing)}")
@@ -115,11 +120,17 @@ def _validate_index_integrity(index: dict) -> None:
         if missing_fields:
             raise IndexIntegrityError(f"Passage {pid!r} is missing field(s): {sorted(missing_fields)}")
 
-        expected_hash = hashlib.sha256(entry["text"].encode("utf-8")).hexdigest()[:16]
+        expected_hash = passage_binding_hash(
+            doc_id=entry["doc_id"], section_title=entry["section_title"], text=entry["text"],
+            company=entry["company"], doc_type=entry["doc_type"], title=entry["title"],
+            version=entry["version"], effective_date=entry["effective_date"], status=entry["status"],
+            supersedes=entry.get("supersedes"), superseded_by=entry.get("superseded_by"),
+        )
         if entry["content_hash"] != expected_hash:
             raise IndexIntegrityError(
-                f"Passage {pid!r} content hash does not match its stored text "
-                "(edited or corrupted index)."
+                f"Passage {pid!r} content hash does not match its stored text/metadata "
+                "(edited or corrupted index): company, status, supersedes/superseded_by, "
+                "version, effective_date, and text are all bound to this hash."
             )
 
         emb = entry["embedding"]
@@ -134,6 +145,8 @@ def _validate_index_integrity(index: dict) -> None:
             )
         if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in emb):
             raise IndexIntegrityError(f"Passage {pid!r} embedding contains non-finite or non-numeric values.")
+
+    return dim or 0
 
 
 def load_index(path: str) -> dict:
@@ -157,10 +170,33 @@ def _cosine(a: list, b: list) -> float:
 
 
 def retrieve(question: str, index: dict, k: int = None, embed_model: str = None) -> list:
-    _validate_index_integrity(index)
+    dim = _validate_index_integrity(index)
     k = k or config.RETRIEVAL_K
-    embed_model = embed_model or index.get("embed_model", config.EMBED_MODEL)
+
+    if embed_model is not None and embed_model != index["embed_model"]:
+        raise IndexIntegrityError(
+            f"Refusing embed_model override {embed_model!r} at query time; this index is "
+            f"bound to {index['embed_model']!r}. A different query-time model would score "
+            "against embeddings it did not produce. Rebuild the index to change models."
+        )
+    embed_model = index["embed_model"]
+
     qvec = embed(question, model=embed_model)
+    if (
+        not isinstance(qvec, list)
+        or not qvec
+        or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in qvec)
+    ):
+        raise IndexIntegrityError(
+            "Query embedding is empty, malformed, or contains non-finite/non-numeric values; "
+            "refusing to score it against the index."
+        )
+    if dim and len(qvec) != dim:
+        raise IndexIntegrityError(
+            f"Query embedding dimension ({len(qvec)}) does not match the index's passage "
+            f"embedding dimension ({dim}); refusing to score a dimension-mismatched vector."
+        )
+
     scored = [
         (_cosine(qvec, entry["embedding"]), entry) for entry in index["passages"]
     ]
